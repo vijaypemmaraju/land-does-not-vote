@@ -1,0 +1,228 @@
+---
+import App from "../components/App";
+
+---
+<script is:inline src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.2/d3.min.js"></script>
+<script is:inline src="https://unpkg.com/d3-interpolate-path@1.1.1/build/d3-interpolate-path.js"></script>
+
+<script>
+	import type D3 from 'd3'
+  type ResultItem = {
+    county_fips: string;
+    county_name: string;
+    diff: string;
+    per_dem: string;
+    per_gop: string;
+    per_point_diff: string;
+    state_name: string;
+    total_votes: string;
+    votes_dem: string;
+    votes_gop: string;
+  };
+
+  type Results = ResultItem[];
+
+  type LatLngItem = {
+    fips_code: string;
+    name: string;
+    lng: string;
+    lat: string;
+  };
+
+  type LatLng = LatLngItem[];
+  import Papa from "papaparse";
+	import { interpolatePath } from 'd3-interpolate-path';
+
+  const resultsCsv = await fetch("./data/results.csv");
+  const resultsText = await resultsCsv.text();
+  const results = Papa.parse(resultsText, { header: true }).data as Results;
+
+  const latlngCsv = await fetch("./data/latlng.csv");
+  const latlngText = await latlngCsv.text();
+  const latlng = Papa.parse(latlngText, { header: true }).data as LatLng;
+
+
+	const countrySvg = await fetch("./data/counties.svg");
+	const countrySvgText = await countrySvg.text();
+	const hiddenSvg = document.createElement("svg")
+	hiddenSvg.setAttribute("width", "1px")
+	hiddenSvg.setAttribute("height", "1px")
+	hiddenSvg.setAttribute("overflow", "visible")
+	hiddenSvg.setAttribute("style", "position:absolute;left:-10000px;top:-10000px;")
+	hiddenSvg.setAttribute("visibility", "hidden")
+	hiddenSvg.setAttribute("pointer-events", "none")
+	hiddenSvg.setAttribute("display", "none")
+	hiddenSvg.innerHTML = countrySvgText;
+	document.body.append(hiddenSvg);
+	const counties = Array.from(hiddenSvg.querySelectorAll('[class="county"]'));
+
+
+	declare global {
+		interface Window {
+			d3: typeof D3
+		}
+	}
+
+	const d3 = window.d3;
+
+  const svg = d3.select("#map")
+  const projection = d3.geoAlbersUsa()
+    .scale(1)
+    .translate([0, 0])
+
+  function updateMap() {
+    const width = svg.node().clientWidth * 4;
+    const height = svg.node().clientHeight * 4;
+
+    svg.attr("width", width)
+       .attr("height", height);
+
+    projection.scale(1)
+              .translate([0, 0]);
+
+    svg.selectAll("g").remove();
+
+    latlng.forEach(point => {
+      const r = projection([parseFloat(point.lng), parseFloat(point.lat)]);
+      if (r) {
+        const [x, y] = r
+        const result = results.find(r => r.county_fips === point.fips_code);
+        if (result) {
+          const g = svg.append("g")
+            .attr("transform", `translate(${x},${y})`);
+          const county = counties.find(c => c.getAttribute("id") === result.county_fips)
+          if (county) {
+            const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+            path.setAttribute("d", county.getAttribute("d") || "");
+
+            const totalVotes = parseInt(result.total_votes);
+            const maxVotes = d3.max(results, d => parseInt(d.total_votes)) || 1;
+            const voteScale = d3.scaleSqrt().domain([0, maxVotes]).range([0, 2]);
+
+            const perGop = parseFloat(result.per_gop);
+            const perDem = parseFloat(result.per_dem);
+            const fillColor = d3.interpolateRdBu((perDem - perGop + 1) / 2);
+
+            path.setAttribute("fill", fillColor);
+            path.setAttribute("stroke", "black");
+            path.setAttribute("stroke-width", "0.25");
+            path.setAttribute("transform", `scale(${1})`);
+
+            g.node()?.appendChild(path);
+            const slider = document.getElementById("view-slider") as HTMLInputElement;
+            let debounceTimer: number;
+            const countyPath = d3.select(path);
+
+            const scaleFactor = voteScale(totalVotes);
+
+            const bbox = path.getBBox();
+            const centerX = bbox.x + bbox.width / 2;
+            const centerY = bbox.y + bbox.height / 2;
+            const radius = Math.max(bbox.width, bbox.height) / 2;
+            const originalPathData = county.getAttribute("d");
+
+            const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+            circle.setAttribute("cx", centerX.toString());
+            circle.setAttribute("cy", centerY.toString());
+            circle.setAttribute("r", "0");
+            circle.setAttribute("fill", fillColor);
+            circle.setAttribute("stroke", "black");
+            circle.setAttribute("stroke-width", "0.25");
+            g.node()?.appendChild(circle);
+
+            const circleElement = d3.select(circle);
+
+            slider?.addEventListener("input", function() {
+              clearTimeout(debounceTimer);
+              const t = parseFloat(this.value);
+
+              debounceTimer = window.setTimeout(() => {
+                countyPath.transition()
+                  .duration(2000)
+                  .attr("transform", `translate(${centerX},${centerY}) scale(${1 - t}) translate(${-centerX},${-centerY})`);
+
+                circleElement.transition()
+                  .duration(2000)
+                  .attr("transform", `translate(${centerX},${centerY}) scale(${t}) translate(${-centerX},${-centerY})`)
+                  .attr("r", radius * scaleFactor * t);
+              }, 0);
+            });
+          }
+
+          g.on("mouseover", function(event) {
+            const tooltip = d3.select("body").append("div")
+              .attr("class", "tooltip")
+              .style("position", "absolute")
+              .style("background-color", "white")
+              .style("border", "1px solid black")
+              .style("padding", "10px")
+              .style("opacity", 0);
+
+            tooltip.transition()
+              .duration(200)
+              .style("opacity", .9);
+
+            const formatNumber = d3.format(",");
+            const formatPercent = d3.format(".1%");
+
+            tooltip.html(`
+              <strong>${result.county_name}</strong><br>
+              <table>
+                <tr><td>Total Votes:</td><td style="text-align: right;">${formatNumber(parseInt(result.total_votes))}</td></tr>
+                <tr><td>Republican:</td><td style="text-align: right;">${formatNumber(parseInt(result.votes_gop))} (${formatPercent(parseFloat(result.per_gop))})</td></tr>
+                <tr><td>Democrat:</td><td style="text-align: right;">${formatNumber(parseInt(result.votes_dem))} (${formatPercent(parseFloat(result.per_dem))})</td></tr>
+              </table>
+            `)
+              .style("left", (event.pageX + 10) + "px")
+              .style("top", (event.pageY - 28) + "px");
+          })
+          .on("mouseout", function() {
+            d3.select(".tooltip").remove();
+          });
+        }
+      }
+    });
+  }
+
+  updateMap();
+  window.addEventListener('resize', updateMap);
+</script>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="/land-does-not-vote/favicon.svg"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="generator" content={Astro.generator} />
+    <title>Land Does Not Vote</title>
+  </head>
+  <body class="bg-gray-900 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+      <h1 class="text-4xl font-bold text-center mt-8 mb-4 text-gray-100">Land Does Not Vote</h1>
+      <p class="text-lg text-center mb-8 text-gray-300">Explore how the visual representation of election results changes between geographic area and population.</p>
+      <div
+        id="slider-container"
+        class="sticky top-20 left-5 right-5 bg-gray-800 shadow-md p-4 rounded-lg z-10"
+      >
+        <input
+          type="range"
+          id="view-slider"
+          min="0"
+          max="1"
+          step="0.01"
+          value="0"
+          class="w-full appearance-none bg-gray-700 h-2 rounded-full outline-none"
+        />
+        <label for="view-slider" class="block mt-2 text-center text-sm text-gray-300">
+          County View &lt;--&gt; Population View
+        </label>
+      </div>
+      <div class="mt-24 flex justify-center items-center">
+        <svg id="map" preserveAspectRatio="xMidYMid meet"></svg>
+      </div>
+    </div>
+  </body>
+</html>
